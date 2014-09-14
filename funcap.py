@@ -40,6 +40,7 @@ So we got one fat script file atm.
 # IDA imports
 
 import sys
+import pickle
 from idaapi import *
 from idautils import *
 from idc import *
@@ -99,10 +100,12 @@ class FunCapHook(DBG_Hooks):
     HEXMODE_LENGTH_IN_COMMENTS = 82
     # visited functions will be tagged as follows
     FUNC_COLOR = 0xF7CBEA
+    #FUNC_COLOR = 0xF7A0A0
     # visited items (except call instructions) will be tagged as follows
     ITEM_COLOR = 0x70E01B
     # calls will be tagged as follows
     CALL_COLOR = 0x99CCCC
+    #CALL_COLOR = 0xB1A0F7
     # maximum comment lines inserted after/before call instructions
     CMT_MAX = 5
 
@@ -120,6 +123,8 @@ class FunCapHook(DBG_Hooks):
         @param overwrite_existing: overwrite existing capture comment in IDA when the same function is called ? (default: no)
         @param recursive: when breaking on a call - are we recursively hooking all call instructions in the new function ? (default: no)
         @param code_discovery: enable discovery of a dynamically created code - for obfuscators and stuff like that (default: no)
+        @param code_discovery_nojmp: don't hook jumps in code_discovery mode (default: no)
+        @param code_discovery_stop: stop if new code section is discovered (default: no)
         @param no_dll: disable API calls capturing (default: no)
         @param strings_file: file containing strings dump on captured function arguments (default: %USERPROFILE%\funcap_strings.txt)
         @param multiple_dereferences: dereference each pointer resursively ? (default: 3 levels, 0 - off)
@@ -136,6 +141,8 @@ class FunCapHook(DBG_Hooks):
         self.overwrite_existing = kwargs.get('overwrite_existing', False)
         self.recursive = kwargs.get('recursive', False)
         self.code_discovery = kwargs.get('code_discovery', False) # for obfuscators
+        self.code_discovery_nojmp = kwargs.get('code_discovery_nojmp', False)
+        self.code_discovery_stop = kwargs.get('code_discovery_stop', False)
         self.no_dll = kwargs.get('no_dll', False)
         self.strings_file = kwargs.get('strings', os.path.expanduser('~') + "/funcap_strings.txt")
         self.multiple_dereferences = kwargs.get('multiple_dereferences', 3)
@@ -227,13 +234,12 @@ class FunCapHook(DBG_Hooks):
 
         self.output("hooking function: %s()" % func)
 
-        f = get_func(ea)
-        start_ea = f.startEA
-        end_ea = f.endEA
-        if jump:
-            self.add_call_and_jump_bp(start_ea, end_ea)
-        else:
-            self.add_call_bp(start_ea, end_ea)
+        chunks = Chunks(ea)
+        for (start_ea, end_ea) in chunks:
+            if jump:
+                self.add_call_and_jump_bp(start_ea, end_ea)
+            else:
+                self.add_call_bp(start_ea, end_ea)
         self.hooked.append(func)
 
     def hookSeg(self, seg = "", jump = False):
@@ -291,6 +297,12 @@ class FunCapHook(DBG_Hooks):
         '''
 
         CallGraph("FunCap: function calls", self.calls_graph, exact_offsets).Show()
+
+    def saveGraph(self, path = os.path.expanduser('~') + "/funcap.graph"):
+        pickle.dump(d.calls_graph, open(path, "w"))
+
+    def loadGraph(self, path = os.path.expanduser('~') + "/funcap.graph"):
+        d.calls_graph = pickle.load(open(path, "r"))
 
     def addStop(self, ea):
         '''
@@ -401,7 +413,6 @@ class FunCapHook(DBG_Hooks):
 
         full_ctx = []
         cmt_ctx = []
-        maxdepth = self.multiple_dereferences
 
         if self.bits == 32:
             format_string = "%3s: 0x%08x"
@@ -426,16 +437,15 @@ class FunCapHook(DBG_Hooks):
             next_memval = getword(memval)
 
             if (self.multiple_dereferences):
+                maxdepth = self.multiple_dereferences
                 while (next_memval): #memval is a proper pointer
-
-                    valchain_full += format_string_append % memval
-                    valchain_cmt += format_string_append % memval
-
-                    if (prev_memval == memval):#points at itself
-                        break
                     if (maxdepth == 0):
                         break
                     maxdepth-=1
+                    if (prev_memval == memval):#points at itself
+                        break
+                    valchain_full += format_string_append % memval
+                    valchain_cmt += format_string_append % memval
 
                     prev_memval = memval
                     memval = next_memval
@@ -476,7 +486,6 @@ class FunCapHook(DBG_Hooks):
 
         full_ctx = []
         cmt_ctx = []
-        maxdepth = self.multiple_dereferences
 
         if self.bits == 32:
             format_string_full = "%3s: 0x%08x"
@@ -503,16 +512,15 @@ class FunCapHook(DBG_Hooks):
             next_memval = getword(memval)
 
             if (self.multiple_dereferences):
+                maxdepth = self.multiple_dereferences
                 while (next_memval): #memval is a proper pointer
-
-                    valchain_full += format_string_append % memval
-                    valchain_cmt += format_string_append % memval
-
-                    if (prev_memval == memval):#points at itself
-                        break
                     if (maxdepth == 0):
                         break
                     maxdepth-=1
+                    if (prev_memval == memval):#points at itself
+                        break
+                    valchain_full += format_string_append % memval
+                    valchain_cmt += format_string_append % memval
 
                     prev_memval = memval
                     memval = next_memval
@@ -555,16 +563,19 @@ class FunCapHook(DBG_Hooks):
 
         full_ctx = []
         cmt_ctx = []
-        maxdepth = self.multiple_dereferences
 
         if self.bits == 32:
             format_string_append =  " -> 0x%08x"
             format_string_full = "%3s: 0x%08x"
             format_string_cmt = "   %3s: 0x%08x"
+            format_string_full_s = "s_%3s: 0x%08x"
+            format_string_cmt_s = "   s_%3s: 0x%08x"
             getword = DbgDword
         else:
             format_string_full = "%3s: 0x%016x"
             format_string_cmt = "   %3s: 0x%016x"
+            format_string_full_s = "s_%3s: 0x%016x"
+            format_string_cmt_s = "   s_%3s: 0x%016x"
             format_string_append =  " -> 0x%016x"
             getword = DbgQword
 
@@ -582,16 +593,15 @@ class FunCapHook(DBG_Hooks):
             next_memval = getword(memval)
 
             if (self.multiple_dereferences):
+                maxdepth = self.multiple_dereferences
                 while (next_memval): #memval is a proper pointer
-
-                    valchain_full += format_string_append % memval
-                    valchain_cmt += format_string_append % memval
-
-                    if (prev_memval == memval):#points at itself
-                        break
                     if (maxdepth == 0):
                         break
                     maxdepth-=1
+                    if (prev_memval == memval):#points at itself
+                        break
+                    valchain_full += format_string_append % memval
+                    valchain_cmt += format_string_append % memval
 
                     prev_memval = memval
                     memval = next_memval
@@ -624,22 +634,22 @@ class FunCapHook(DBG_Hooks):
         if saved_regs:
             for reg in saved_regs:
                 if any(regex.match(reg['name']) for regex in self.CMT_RET_SAVED_CTX):
-                    valchain_full =  format_string_full % (reg['name'], reg['value'])
-                    valchain_cmt = format_string_cmt % (reg['name'], reg['value'])
+                    valchain_full =  format_string_full_s % (reg['name'], reg['value'])
+                    valchain_cmt = format_string_cmt_s % (reg['name'], reg['value'])
                     prev_memval = reg['value']
                     memval=getword(reg['value'])
                     next_memval = getword(memval)
 
                     if (self.multiple_dereferences):
+                        maxdepth = self.multiple_dereferences
                         while (next_memval): #memval is a proper pointer
-                            valchain_full += format_string_append % memval
-                            valchain_cmt += format_string_append % memval
-
-                            if (prev_memval == memval):#points at itself
-                                break
                             if (maxdepth == 0):
                                 break
+                            if (prev_memval == memval):#points at itself
+                                break
                             maxdepth-=1
+                            valchain_full += format_string_append % memval
+                            valchain_cmt += format_string_append % memval
 
                             prev_memval = memval
                             memval = next_memval
@@ -1017,6 +1027,7 @@ class FunCapHook(DBG_Hooks):
         '''
         Called when breakpoint hits on a jump instruction when code_discovery mode enabled
         '''
+
         if self.current_caller:
             self.delayed_caller = { 'type': 'jump', 'addr' : ea }
         else:
@@ -1026,11 +1037,12 @@ class FunCapHook(DBG_Hooks):
         '''
         Called when single stepping into a jmp instruction
         '''
+
         if self.comments:
             MakeComm(self.current_caller['addr'], "0x%x" % ea)
         seg_name = SegName(ea)
-        if self.code_discovery and not isCode(GetFlags(ea)) and not self.is_system_lib(seg_name):
-            self.output("New code segment discovered: %s" % seg_name)
+        if self.code_discovery and (not isCode(GetFlags(ea)) or not self.isCode) and not self.is_system_lib(seg_name):
+            self.output("New code segment discovered: %s (0x%x => 0x%x)" % (seg_name, self.current_caller['addr'], ea))
             start_ea = SegStart(ea)
             end_ea = SegEnd(ea)
             refresh_debugger_memory()
@@ -1054,18 +1066,20 @@ class FunCapHook(DBG_Hooks):
 
         name = GetFunctionName(ea)
         symbol_name = Name(ea)
-        
+
         if symbol_name and name and symbol_name != name and not re.match("loc_", symbol_name):
             self.output("WARNING: IDA has probably wrongly analyzed the following function: %s and " \
                         "it is overlapping with another symbol: %s. Funcap will undefine it. " % (name, symbol_name))
             DelFunction(LocByName(name))
             name = None
-        
+
         if name: return name
 
         need_hooking = False
+        #refresh_debugger_memory() # SegName didn't seem to work sometimes
         seg_name = SegName(ea)
-        if self.code_discovery and not self.is_system_lib(seg_name) and not isCode(GetFlags(ea)):
+        if self.code_discovery and not self.is_system_lib(seg_name) and (not isCode(GetFlags(ea)) or not self.isCode):
+            #print "need_hooking :: ea: %x, seg_name: %s" % (ea, seg_name)
             need_hooking = True
 
         refresh_debugger_memory() # need to call this here (thx IlfakG)
@@ -1097,8 +1111,14 @@ class FunCapHook(DBG_Hooks):
             start_ea = SegStart(ea)
             end_ea = SegEnd(ea)
             refresh_debugger_memory()
+            self.output("0x%x: new code section detected: [0x%x, 0x%x]" % (ea, start_ea, end_ea))
             AnalyzeArea(start_ea, end_ea)
-            self.add_call_and_jump_bp(start_ea, end_ea)
+            if self.code_discovery_stop:
+                self.resume = False
+            if self.code_discovery_nojmp:
+                self.add_call_bp(start_ea, end_ea)
+            else:
+                self.add_call_and_jump_bp(start_ea, end_ea)
 
         if r:
             name = GetFunctionName(ea)
@@ -1114,6 +1134,13 @@ class FunCapHook(DBG_Hooks):
         '''
 
         ea = self.get_ip()
+
+        if self.is_fake_call(ea):
+            MakeComm(self.current_caller['addr'], "fake function call to 0x%x" % ea)
+            self.output("0x%X: fake function call to 0x%x" % (self.current_caller['addr'],ea))
+            self.current_caller = self.delayed_caller
+            self.delayed_caller = None
+            return 0
 
         #print "handle_after_call(): 0x%x" % ea
 
@@ -1197,8 +1224,8 @@ class FunCapHook(DBG_Hooks):
         self.output_lines([ header ] + context_full + [ "" ])
 
         # we prefer kernel32 than kernelbase etc. - this is to bypass stubs
-        if self.stub_name:
-            name = self.stub_name
+        #if self.stub_name:
+        #    name = self.stub_name
 
         # insert IDA's comments
         if self.comments and (self.overwrite_existing or caller_ea not in self.visited):
@@ -1247,6 +1274,7 @@ class FunCapHook(DBG_Hooks):
 
         #print "dbg_bpt(): 0x%x" % ea
 
+        refresh_debugger_memory()
         is_func_start = False
 
         if ea in self.stop_points:
@@ -1307,6 +1335,7 @@ class FunCapHook(DBG_Hooks):
         # if we are currently bouncing off a stub, bounce one step further
         ea = self.get_ip()
 
+        refresh_debugger_memory()
         #print "dbg_step_into(): 0x%x" % ea
 
         if self.stub_steps > 0:
@@ -1320,6 +1349,7 @@ class FunCapHook(DBG_Hooks):
         # print "check_stub(): %x : %d" % (ea, self.stub_steps)
         if self.stub_steps > 0:
             self.stub_name = Name(ea)
+            #print "in self.stub_steps > 0: Name: %s" % self.stub_name
             self.stub_steps = self.stub_steps - 1
             request_step_into()
             run_requests()
@@ -1370,7 +1400,8 @@ class X86CapHook(FunCapHook):
         '''
         Check if we are at jump to subrouting instruction
         '''
-        mnem = GetMnem(ea)
+        mnem = GetDisasm(ea)
+        if re.match('call\s+far ptr', mnem): return None # when IDA badly identifies data as code it throws false positives - zbot example
         return re.match('call', mnem)
 
     def is_jump(self, ea):
@@ -1465,8 +1496,19 @@ class X86CapHook(FunCapHook):
 
         ## several different types of stubs spotted in kernel32.dll one Windows 7 32bit, maybe others dll as well ?
         # type 1 - simple jump to offset - need to do 1 single step
+
+
+        # a bit of a workaround - we need to know if it is code or note before making it code. Needed for code_discovery
+
+        if(isCode(GetFlags(ea))):
+            self.isCode = True
+        else:
+            self.isCode = False
+            MakeCode(ea)
+
         disasm = GetDisasm(ea)
         if re.match('^jmp', disasm):
+            #print "in check_stub(): JMP stub detected"
             return 1
         # type 2 - strange do-nothing-instruction chain like the below
         # kernel32.dll:76401484 8B FF                         mov     edi, edi
@@ -1479,6 +1521,14 @@ class X86CapHook(FunCapHook):
             return 5
         # no stubs. You can define your custom stubs here
         return 0
+
+    def is_fake_call(self, ea):
+        '''
+        Check if it is a fake call and function should not be analyzed there
+        Currently only checking call-to-pops, what else ?
+        '''
+        mnem = GetMnem(ea)
+        return re.match('pop', mnem)
 
 class AMD64CapHook(FunCapHook):
     '''
@@ -1603,6 +1653,15 @@ class AMD64CapHook(FunCapHook):
         # no stubs
         return 0
 
+    def is_fake_call(self, ea):
+        '''
+        Check if it is a fake call and function should not be analyzed there
+        Currently only checking call-to-pops, what else ?
+        '''
+        mnem = GetMnem(ea)
+        return re.match('pop', mnem)
+
+
 class ARMCapHook(FunCapHook):
     '''
     ARM/Thumb architecture. Not every feature supported yet, especially stack-based argument capturing.
@@ -1684,6 +1743,13 @@ class ARMCapHook(FunCapHook):
     def check_stub(self, ea):
         return 0
 
+    def is_fake_call(self, ea):
+        '''
+        Not implemented for this platform yet
+        '''
+        return False
+
+
 
 class CallGraph(GraphViewer):
     '''
@@ -1697,7 +1763,7 @@ class CallGraph(GraphViewer):
         self.calls = calls
         self.nodes = {}
         self.exact_offsets = exact_offsets
-        
+
     # warning: this won't work after code relocation !
     def OnRefresh(self):
         self.Clear()
@@ -1721,7 +1787,7 @@ class CallGraph(GraphViewer):
                     graph_caller = GetFunctionAttr(caller['ea'], FUNCATTR_START)
                     if graph_caller == 0xffffffff: # no symbol exist
                         graph_caller = caller['ea']
-                        caller_name = caller['name'] 
+                        caller_name = caller['name']
                     else:
                         caller_name = GetFunctionName(graph_caller)
                 if not node_callers.has_key(graph_caller):
